@@ -568,7 +568,7 @@ executable hnix
       Paths_hnix
   hs-source-dirs:
       main
-  ghc-options: -Wall -rtsopts
+  ghc-options: -Wall -rtsopts +RTS -A256M -RTS
   build-depends:
       aeson
     , base >=4.9 && <5

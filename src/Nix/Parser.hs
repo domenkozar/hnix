@@ -144,10 +144,12 @@ nixTerm = do
             if isDigit c
             then [ nixFloat
                  , nixInt ]
-            else [ nixUri | isAlpha c ] ++
-                 [ nixBool | c == 't' || c == 'f' ] ++
+            else [ nixBool | c == 't' || c == 'f' ] ++
                  [ nixNull | c == 'n' ] ++
+                 [ nixUri ] ++
                  [ nixSelect nixSym ]
+
+
 
 nixToplevelForm :: Parser NExprLoc
 nixToplevelForm = keywords <+> nixLambda <+> nixExpr
@@ -178,10 +180,18 @@ nixList :: Parser NExprLoc
 nixList = annotateLocation1 (brackets (NList <$> many nixTerm) <?> "list")
 
 pathChar :: Char -> Bool
-pathChar x = isAlpha x || isDigit x || x == '.' || x == '_' || x == '-' || x == '+' || x == '~'
+pathChar x = isAlpha x || isDigit x || x `HashSet.member` pathC
+  where
+    pathC :: HashSet Char
+    pathC = HashSet.fromList
+      [ '.', '_'
+      , '-', '+'
+      , '!'
+      ]
+
 
 slash :: Parser Char
-slash = try (char '/' <* notFollowedBy (satisfy (\x -> x == '/' || x == '*' || isSpace x)))
+slash = char '/' <* notFollowedBy (satisfy (\x -> x == '/' || x == '*' || isSpace x))
     <?> "slash"
 
 -- | A path surrounded by angle brackets, indicating that it should be
@@ -189,14 +199,14 @@ slash = try (char '/' <* notFollowedBy (satisfy (\x -> x == '/' || x == '*' || i
 nixSearchPath :: Parser NExprLoc
 nixSearchPath = annotateLocation1
     (mkPathF True <$> try (char '<' *> many (satisfy pathChar <+> slash) <* symbol ">")
-         <?> "spath")
+         <?> "search path")
 
 pathStr :: Parser FilePath
 pathStr = lexeme $ liftM2 (++) (many (satisfy pathChar))
     (Prelude.concat <$> some (liftM2 (:) slash (some (satisfy pathChar))))
 
 nixPath :: Parser NExprLoc
-nixPath = annotateLocation1 (try (mkPathF False <$> pathStr) <?> "path")
+nixPath = annotateLocation1 ((mkPathF False <$> try pathStr) <?> "path")
 
 nixLet :: Parser NExprLoc
 nixLet = annotateLocation1 (reserved "let"
@@ -240,12 +250,22 @@ nixUri :: Parser NExprLoc
 nixUri = annotateLocation1 $ lexeme $ try $ do
     start <- letterChar
     protocol <- many $ satisfy $ \x ->
-        isAlpha x || isDigit x || x `elem` ("+-." :: String)
+        isAlpha x || isDigit x || x `HashSet.member` protocolChars
     _ <- string ":"
     address  <- some $ satisfy $ \x ->
-        isAlpha x || isDigit x || x `elem` ("%/?:@&=+$,-_.!~*'" :: String)
+        isAlpha x || isDigit x || x `HashSet.member` addressChars
     return $ NStr $
         DoubleQuoted [Plain $ pack $ start : protocol ++ ':' : address]
+  where
+    protocolChars :: HashSet Char
+    protocolChars = HashSet.fromList
+      [ '+', '-', '.']
+
+    addressChars :: HashSet Char
+    addressChars = HashSet.fromList
+      [ '%', '/', '?', ':', '@', '&'
+      , '=', '+', '$', ',', '-', '_'
+      , '.', '!', '~', '*', '\'']
 
 nixString' :: Parser (NString NExprLoc)
 nixString' = lexeme (doubleQuoted <+> indented <?> "string")
@@ -290,13 +310,17 @@ nixString' = lexeme (doubleQuoted <+> indented <?> "string")
 
 -- | Gets all of the arguments for a function.
 argExpr :: Parser (Params NExprLoc)
-argExpr = msum [atLeft, onlyname, atRight] <* symbol ":" where
+argExpr = do
+  ret <- msum [atLeft, onlyname, atRight] <* symbol ":"
+  _ <- notFollowedBy (char '/')
+  _ <- notFollowedBy (char '/')
+  return ret
+  where
   -- An argument not in curly braces. There's some potential ambiguity
   -- in the case of, for example `x:y`. Is it a lambda function `x: y`, or
   -- a URI `x:y`? Nix syntax says it's the latter. So we need to fail if
   -- there's a valid URI parse here.
-  onlyname = msum [nixUri >> unexpected (Label ('v' NE.:| "alid uri")),
-                     Param <$> identifier]
+  onlyname = Param <$> identifier
 
   -- Parameters named by an identifier on the left (`args @ {x, y}`)
   atLeft = try $ do
@@ -393,19 +417,26 @@ symbol :: Text -> Parser Text
 symbol = lexeme . string
 
 reservedEnd :: Char -> Bool
-reservedEnd x = isSpace x ||
-    x == '{' || x == '(' || x == '[' ||
-    x == '}' || x == ')' || x == ']' ||
-    x == ';' || x == ':' || x == '.' ||
-    x == '"' || x == '\'' || x == ','
+reservedEnd x = isSpace x || x `HashSet.member` reservedEndChars
+
+reservedEndChars :: HashSet Char
+reservedEndChars = HashSet.fromList
+  [ '{', '}'
+  , '(', ')'
+  , '[', ']'
+  , ';', ':'
+  , '.', ','
+  , '"', '\''
+  ]
 
 reserved :: Text -> Parser ()
 reserved n = lexeme $ try $
     string n *> lookAhead (void (satisfy reservedEnd) <|> eof)
 
+identifier :: Parser Text
 identifier = lexeme $ try $ do
     ident <- cons <$> satisfy (\x -> isAlpha x || x == '_')
-                 <*> takeWhileP Nothing identLetter
+                  <*> takeWhileP (Just "identifier char") identLetter
     guard (not (ident `HashSet.member` reservedNames))
     return ident
   where
